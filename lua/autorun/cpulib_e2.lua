@@ -476,7 +476,7 @@ if myCPUExtension then
 		end
 		local written_bytes = 0
 		for ind, i in ipairs(buffer) do
-			table[startind+ind] = i
+			table[startind+(ind-1)] = i
 			written_bytes = written_bytes + 1
 		end
 		print("Write Buffer wrote ",written_bytes," bytes")
@@ -584,7 +584,12 @@ if myCPUExtension then
 		if checkContextValid(VM,VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[2])
 			if str then
-				E2TabletoBuffer(VM,VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str])
+				local buff = E2TabletoBuffer(VM,VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str])
+				local address = Operands[1]
+				for ind,i in ipairs(buff) do
+					-- If the ZVM errors on write it'll return false
+					if not VM:WriteCell(ind+address,i) then break end
+				end
 			end
 		end
 	end
