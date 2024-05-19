@@ -425,8 +425,6 @@ if myCPUExtension then
 	end
 	local function stringToBuffer(var)
 		local size = #var
-		print("Converting string: '",var,"' with size ",size)
-		print(string.byte(var,1,size))
 		local buff = {}
 		if size == 0 then
 			return {0}
@@ -435,8 +433,6 @@ if myCPUExtension then
 		-- including the null terminator
 		buff = table.Pack(string.byte(var,1,math.Clamp(size,1,7999)))
 		table.insert(buff,0) -- add null terminator
-		print("string buffer: ")
-		PrintTable(buff)
 		return buff
 	end
 	local function rawNumberArrayToBuffer(var)
@@ -479,8 +475,12 @@ if myCPUExtension then
 			table[startind+(ind-1)] = i
 			written_bytes = written_bytes + 1
 		end
-		print("Write Buffer wrote ",written_bytes," bytes")
 		return written_bytes+1
+	end
+	local function copyBufferSection(dest,src,dest_start,src_start,max_write)
+		for ind=0,max_write-1,1 do
+			dest[dest_start+ind] = src[src_start+ind]
+		end
 	end
 	local function E2TabletoBuffer(VM,e2table)
 		-- TODO: Optimize value/type writing, if we know the number of values and they're all forced to 1 byte
@@ -577,7 +577,213 @@ if myCPUExtension then
 		PrintTable(buff)
 		return buff
 	end
-	local function BuffertoE2Table()
+	local function bufferToNumber(buff)
+		return buff[1]
+	end
+	local function bufferToEnt(buff)
+		return Entity(buff[1])
+	end
+	local function bufferToString(buff)
+		-- strip 0 from null terminated string if it exists
+		if(buff[#buff] == 0) then
+			buff[#buff] = nil
+		end
+		return string.char(buff)
+	end
+	local function bufferToRawNumberArray(buff)
+		-- a buffer is just a raw number array but this is useful for the lookup
+		return buff
+	end
+	local function bufferToAngle(buff)
+		return Angle(buff[1],buff[2],buff[3])
+	end
+	local function bufferToVector3(buff)
+		return Vector(buff[1],buff[2],buff[3])
+	end
+	local bufferToPrimitiveLookup = {
+		n = bufferToNumber, -- normal / number
+		e = bufferToEnt, -- entity
+		s = bufferToString, -- string
+		xwl = bufferToEnt, -- WIRELINK
+		xv2 = bufferToRawNumberArray, -- VECTOR2
+		c = bufferToRawNumberArray, -- COMPLEX
+		q = bufferToRawNumberArray, -- QUATERNION
+		xv4 = bufferToRawNumberArray, -- VECTOR4
+		xm2 = bufferToRawNumberArray, -- MATRIX2
+		m = bufferToRawNumberArray, -- MATRIX
+		xm4 = bufferToRawNumberArray, -- MATRIX4
+		a = bufferToAngle, -- angle
+		v = bufferToVector3, -- vector3
+	}
+	local function bufferToType(VM,buff,type)
+		local typeConversion = bufferToPrimitiveLookup[type]
+		if typeConversion then
+			typeConversion(buff)
+		end
+		return nil
+	end
+	local function readStringFromNumberBuffer(buff,startind)
+		local str = {}
+		local ind = startind or 1
+		while(buff[ind] ~= 0) do
+			if buff[ind] == nil then
+				break
+			end
+			table.insert(str,buff[ind])
+			ind = ind + 1
+		end
+		return string.char(unpack(str))
+	end
+	-- get size of an e2 table in buffer form
+	local function getE2TableBufferSize(VM,ptr)
+		-- * Strategy:
+		-- * 1: Search for the last pointer in ntypes or stypes, find the largest pointer and add type size to it
+			-- * since s vars usually come last, we should check that section first for the last ptr in its set
+		-- * 2: If there are no ptr types in s types we have to check n types
+			-- * if there are no ptr types in n types but we have ANY s keys available get the last s key and get its length
+		-- * 3: At this point, if there are no s vars, we can just sum the size of the metadata (6 bytes) + number of n vars * 2
+		local ntypesptr = VM:ReadCell(ptr+4)
+		local stypesptr = VM:ReadCell(ptr+6)
+		local svars, nvars = 0,0
+		local lastptr = 0
+		local lastptrsize = 0
+		print(ptr,ntypesptr,stypesptr)
+		if stypesptr > 0 then
+			svars = math.min(VM:ReadCell(ptr+1),65536)
+			print("svars: ",svars)
+			local svarptr = VM:ReadCell(ptr+5)
+			if svarptr > 0 then
+				for i=0,svars-1,1 do
+					local type = VM:ReadCell(ptr+stypesptr+i)
+					print("typenum",type)
+					type = VM.E2TypeInfo.TypeIDs[type]
+					print(type,ptr+stypesptr+i)
+					if type then
+						local primitive = primitiveSizeLookup[type.name] or 0
+						print("checked type",type.name,"size was",primitive)
+						if primitive > 1 then
+							local sptr = VM:ReadCell(ptr+svarptr+i)
+							if sptr > lastptr then
+								print("lastptr overwritten, now ",sptr,primitive)
+								lastptr = sptr
+								lastptrsize = primitive
+							end
+						end
+					end
+				end
+			end
+		end
+		if lastptr ~= 0 then
+			print("Table size estimated using method 1, size: ",lastptr+lastptrsize)
+			return lastptr+lastptrsize
+		end
+		-- So there were no pointers in the svars, or we had no svars, so we have to now check nvars
+		if ntypesptr > 0 then
+			nvars = math.min(VM:ReadCell(ptr+0),65536)
+			print("nvars: ",nvars)
+			local nvarptr = VM:ReadCell(ptr+2)
+			if nvarptr > 0 then
+				for i=0,nvars-1,1 do
+					local type = VM:ReadCell(ptr+ntypesptr+i)
+					local primitive = primitiveSizeLookup[VM.E2TypeInfo.TypeIDs[type].name] or 0
+					print("checked type",type,"size was",primitive)
+					if primitive > 1 then
+						local sptr = VM:ReadCell(ptr+nvarptr+i)
+						if sptr > lastptr then
+							lastptr = sptr
+							lastptrsize = primitive
+						end
+					end
+				end
+			end
+		end
+		if lastptr ~= 0 then
+			print("Table size estimated using method 2, size: ",lastptr+lastptrsize)
+			return lastptr+lastptrsize
+		end
+		-- No pointers in the nvars, or we had no nvars, so lets really quickly check keys
+		if svars > 0 then
+			local lastptr = VM:ReadCell(ptr+5+svars) -- getting buff[7]+#svars to get the last key
+			lastptrsize = #VM:ReadString(ptr+lastptr)
+		end
+		if lastptr ~= 0 then
+			print("Table size estimated using method 3, size: ",lastptr+lastptrsize)
+			return lastptr+lastptrsize
+		end
+		-- Every other trick has failed, we have no n ptrs, no s vars, the table must only have 1 byte n vars
+		-- so its size can be estimated as such
+		print("Table size estimated using method 4, size: ",6+nvars*2)
+		return 6+nvars*2
+	end
+	local function buffertoE2Table(VM,buff)
+		local e2table = E2Lib.newE2Table()
+		-- Parse n values and ntypes
+		if buff[1] > 0 then
+			local nptr = buff[3]
+			local ntypeptr = buff[4]
+			for ind=0, buff[1]-1, 1 do
+				local type = VM.E2TypeInfo.TypeIDs[buff[ntypeptr+ind]]
+				local value
+				if type then
+					local size = primitiveSizeLookup[type.name]
+					local tempBuffer = {}
+					local dptr = nptr+ind
+					if size then
+						if size > 1 then
+							dptr = buff[nptr+ind]
+						end
+							copyBufferSection(tempBuffer,buff,1,dptr,size)
+							value = bufferToType(VM,tempBuffer,type.name)
+					else
+						if type.name == "s" then
+							local dptr = buff[nptr+ind]
+							if dptr > 0 then
+								value = readStringFromNumberBuffer(buff,dptr)
+							end
+						end
+					end
+					if value ~= nil then
+						table.insert(e2table.n,value)
+						table.insert(e2table.ntypes,type.name)
+						e2table.size = e2table.size + 1
+					end
+				end
+			end
+		end
+		-- parse s values and stypes
+		if buff[2] > 0 then
+			local sptr = buff[5]
+			local stypeptr = buff[6]
+			for ind=0, buff[2]-1, 1 do
+				local key = readStringFromNumberBuffer(buff,buff[7+ind])
+				local type = VM.E2TypeInfo.TypeIDs[buff[stypeptr+ind]]
+				local value
+				if type then
+					local size = primitiveSizeLookup[type.name]
+					local tempBuffer = {}
+					local dptr = sptr+ind
+					if size then
+						if size > 1 then
+							dptr = buff[sptr+ind]
+						end
+							copyBufferSection(tempBuffer,buff,1,dptr,size)
+							value = bufferToType(VM,tempBuffer,type.name)
+					else
+						if type.name == "s" then
+							local dptr = buff[sptr+ind]
+							if dptr > 0 then
+								value = readStringFromNumberBuffer(buff,dptr)
+							end
+						end
+					end
+					if value ~= nil then
+						e2table.s[key] = value
+						e2table.stypes[key] = type.name
+						e2table.size = e2table.size + 1
+					end
+				end
+			end
+		end
 	end
 
 	local function readE2Table(VM,Operands)
@@ -588,7 +794,8 @@ if myCPUExtension then
 				local address = Operands[1]
 				for ind,i in ipairs(buff) do
 					-- If the ZVM errors on write it'll return false
-					if not VM:WriteCell(ind+address,i) then break end
+					-- However, it returns nothing / nil on success.
+					if VM:WriteCell(ind+address,i) ~= nil then break end
 				end
 			end
 		end
@@ -601,6 +808,31 @@ if myCPUExtension then
 		{
 			Version = 0.42,
 			Description = "Read a table from E2 by name in Register 2 to Memory Address in Register 1"
+		}
+	)
+	local function writeE2Table(VM,Operands)
+		if checkContextValid(VM,VM.TargetedE2Context) then
+			local str = VM:ReadString(Operands[1])
+			if str then
+				local address = Operands[2]
+				local size = getE2TableBufferSize(VM,address)
+				local buff = {}
+				for i=0,size-1,1 do
+					table.insert(buff,VM:ReadCell(address+i))
+				end
+				local e2table = buffertoE2Table(VM,buff)
+				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = e2table
+			end
+		end
+	end
+	myCPUExtension:InstructionFromLuaFunc(
+		"E2_WRITE_TABLE",
+		2,
+		writeE2Table,
+		{},
+		{
+			Version = 0.42,
+			Description = "Write a table to E2 by name in Register 1 from Memory Address in Register 2 [UNFINISHED]"
 		}
 	)
 end
