@@ -299,7 +299,6 @@ if myCPUExtension then
 		if not t then
 			return ""
 		end
-		print(t)
 		if t == "table" then -- var is a table, will need probing to discover its true type
 			if var.ntypes or var.stypes then
 				return "t" -- var is a typed E2 table, it has a list of type indices
@@ -314,9 +313,13 @@ if myCPUExtension then
 	end
 	local function sumTypeArray(VM,arr)
 		local sum = 0
+		local singleCellTypes = 0
 		for ind,i in ipairs(arr) do
 			local primitive = primitiveSizeLookup[i]
 			if primitive then
+				if primitive == 1 then
+					singleCellTypes = singleCellTypes + 1
+				end
 				sum = sum + primitive
 			else
 				local E2TypeDefault = VM.E2TypeInfo.TypeNames[i][2]
@@ -325,29 +328,30 @@ if myCPUExtension then
 				end
 			end
 		end
-		return sum
+		return sum, singleCellTypes
 	end
 	local function sumTypeDict(VM,dict)
 		-- just convert the typedict to a typearray and use sumTypeArray after we sum the size of the keys
 		local typearr = {}
 		local stringSizes = 0
 		for k,v in pairs(dict) do
-			stringSizes = #k + 1 -- + 1 because it needs a null terminator after each
+			stringSizes = stringSizes + (#k+1)  -- + 1 because it needs a null terminator after each
 			table.insert(typearr,v)
 		end
 		return stringSizes,sumTypeArray(VM,typearr)
 	end
 	local function getE2TableDataSize(VM,table)
-		local metadatasize = 7 -- metadata amount for storing the table's offsets, unchanging
+		local metadatasize = 6 -- metadata amount for storing the table's offsets, unchanging
 		local numindex_size = (#table.ntypes)*2 -- size required for storing the numeric indexes, without their values
-		local numindex_value_size = sumTypeArray(VM,table.ntypes)
+		local numindex_value_size, numindex_single_cell_types = sumTypeArray(VM,table.ntypes)
+		numindex_value_size = numindex_value_size - numindex_single_cell_types
 		local strindex_size = 0 -- requires 3 bytes per string index because it has ptr to name as well as type and value arr
 		for _,_ in pairs(table.stypes) do
 			strindex_size = strindex_size + 3
 		end
-		local str_name_size, strindex_value_size = sumTypeDict(VM,table.stypes)
+		local str_name_size, strindex_value_size, strindex_single_cell_types = sumTypeDict(VM,table.stypes)
+		strindex_value_size = strindex_value_size - strindex_single_cell_types
 		local sum = metadatasize+numindex_size+numindex_value_size+strindex_size+str_name_size+strindex_value_size
-		PrintTable({sum=sum,numindex=numindex_size,numindex_value=numindex_value_size,strindex=strindex_size,strindex_value=strindex_value_size,strname=str_name_size})
 		return sum,
 		numindex_size,
 		numindex_value_size,
@@ -388,7 +392,7 @@ if myCPUExtension then
 		{"W1"},
 		{
 			Version = 0.42,
-			Description = "Get size of variable [UNFINISHED]"
+			Description = "Get size of variable in open e2 handle by name in operand 2 and put its size in operand 1"
 		}
 	)
 	local function readVariableType(VM,Operands)
@@ -475,7 +479,7 @@ if myCPUExtension then
 			table[startind+(ind-1)] = i
 			written_bytes = written_bytes + 1
 		end
-		return written_bytes+1
+		return written_bytes
 	end
 	local function copyBufferSection(dest,src,dest_start,src_start,max_write)
 		for ind=0,max_write-1,1 do
@@ -532,12 +536,10 @@ if myCPUExtension then
 		end
 		-- we can now write the key strings to buffer and populate the char** waiting at buff[7]
 		if buff[2] > 0 then
-			print("flushing key strings")
-			PrintTable(deferred_writes)
 			for i=1,buff[2],1 do
-				print(i)
 				local write = table.remove(deferred_writes,1)
-				buff[write.ptr] = write_ptr
+				-- convert the write_ptr of a deferred write to a 0 indexing system
+				buff[write.ptr] = write_ptr-1
 				write_ptr = write_ptr + writeBuffer(buff,write.buff,write_ptr)
 			end
 			-- write s values
@@ -569,12 +571,10 @@ if myCPUExtension then
 		end
 		-- write remaining deferred writes to the additional section
 		for ind, i in ipairs(deferred_writes) do
-			buff[i.ptr] = write_ptr
+			-- convert the write_ptr of a deferred write to a 0 indexing system
+			buff[i.ptr] = write_ptr-1
 			write_ptr = write_ptr + writeBuffer(buff,i.buff,write_ptr)
 		end
-		print("completed, printing results")
-		PrintTable(e2table)
-		PrintTable(buff)
 		return buff
 	end
 	local function bufferToNumber(buff)
@@ -618,7 +618,7 @@ if myCPUExtension then
 	local function bufferToType(VM,buff,type)
 		local typeConversion = bufferToPrimitiveLookup[type]
 		if typeConversion then
-			typeConversion(buff)
+			return typeConversion(buff)
 		end
 		return nil
 	end
@@ -640,31 +640,25 @@ if myCPUExtension then
 		-- * 1: Search for the last pointer in ntypes or stypes, find the largest pointer and add type size to it
 			-- * since s vars usually come last, we should check that section first for the last ptr in its set
 		-- * 2: If there are no ptr types in s types we have to check n types
-			-- * if there are no ptr types in n types but we have ANY s keys available get the last s key and get its length
+			-- * if there are no ptr types in n types but we have ANY s vars, just return the svartypesptr + svars
 		-- * 3: At this point, if there are no s vars, we can just sum the size of the metadata (6 bytes) + number of n vars * 2
-		local ntypesptr = VM:ReadCell(ptr+4)
-		local stypesptr = VM:ReadCell(ptr+6)
+		local ntypesptr = VM:ReadCell(ptr+3)
+		local stypesptr = VM:ReadCell(ptr+5)
 		local svars, nvars = 0,0
 		local lastptr = 0
 		local lastptrsize = 0
-		print(ptr,ntypesptr,stypesptr)
 		if stypesptr > 0 then
 			svars = math.min(VM:ReadCell(ptr+1),65536)
-			print("svars: ",svars)
-			local svarptr = VM:ReadCell(ptr+5)
+			local svarptr = VM:ReadCell(ptr+4)
 			if svarptr > 0 then
 				for i=0,svars-1,1 do
 					local type = VM:ReadCell(ptr+stypesptr+i)
-					print("typenum",type)
 					type = VM.E2TypeInfo.TypeIDs[type]
-					print(type,ptr+stypesptr+i)
 					if type then
 						local primitive = primitiveSizeLookup[type.name] or 0
-						print("checked type",type.name,"size was",primitive)
 						if primitive > 1 then
 							local sptr = VM:ReadCell(ptr+svarptr+i)
 							if sptr > lastptr then
-								print("lastptr overwritten, now ",sptr,primitive)
 								lastptr = sptr
 								lastptrsize = primitive
 							end
@@ -674,45 +668,42 @@ if myCPUExtension then
 			end
 		end
 		if lastptr ~= 0 then
-			print("Table size estimated using method 1, size: ",lastptr+lastptrsize)
 			return lastptr+lastptrsize
 		end
 		-- So there were no pointers in the svars, or we had no svars, so we have to now check nvars
 		if ntypesptr > 0 then
 			nvars = math.min(VM:ReadCell(ptr+0),65536)
-			print("nvars: ",nvars)
 			local nvarptr = VM:ReadCell(ptr+2)
 			if nvarptr > 0 then
 				for i=0,nvars-1,1 do
 					local type = VM:ReadCell(ptr+ntypesptr+i)
-					local primitive = primitiveSizeLookup[VM.E2TypeInfo.TypeIDs[type].name] or 0
-					print("checked type",type,"size was",primitive)
-					if primitive > 1 then
-						local sptr = VM:ReadCell(ptr+nvarptr+i)
-						if sptr > lastptr then
-							lastptr = sptr
-							lastptrsize = primitive
+					type = VM.E2TypeInfo.TypeIDs[type]
+					if type then
+						local primitive = primitiveSizeLookup[type.name] or 0
+						if primitive > 1 then
+							local sptr = VM:ReadCell(ptr+nvarptr+i)
+							if sptr > lastptr then
+								lastptr = sptr
+								lastptrsize = primitive
+							end
 						end
 					end
 				end
 			end
 		end
 		if lastptr ~= 0 then
-			print("Table size estimated using method 2, size: ",lastptr+lastptrsize)
 			return lastptr+lastptrsize
 		end
-		-- No pointers in the nvars, or we had no nvars, so lets really quickly check keys
+		-- No pointers in the nvars, or we had no nvars, stypesptr is thus the last 
 		if svars > 0 then
-			local lastptr = VM:ReadCell(ptr+5+svars) -- getting buff[7]+#svars to get the last key
-			lastptrsize = #VM:ReadString(ptr+lastptr)
+			lastptr = stypesptr
+			lastptrsize = svars-1
 		end
 		if lastptr ~= 0 then
-			print("Table size estimated using method 3, size: ",lastptr+lastptrsize)
 			return lastptr+lastptrsize
 		end
 		-- Every other trick has failed, we have no n ptrs, no s vars, the table must only have 1 byte n vars
 		-- so its size can be estimated as such
-		print("Table size estimated using method 4, size: ",6+nvars*2)
 		return 6+nvars*2
 	end
 	local function buffertoE2Table(VM,buff)
@@ -755,7 +746,7 @@ if myCPUExtension then
 			local sptr = buff[5]
 			local stypeptr = buff[6]
 			for ind=0, buff[2]-1, 1 do
-				local key = readStringFromNumberBuffer(buff,buff[7+ind])
+				local key = readStringFromNumberBuffer(buff,buff[7+ind]+1) -- convert the ptr from a 0 index to a 1 index
 				local type = VM.E2TypeInfo.TypeIDs[buff[stypeptr+ind]]
 				local value
 				if type then
@@ -784,6 +775,7 @@ if myCPUExtension then
 				end
 			end
 		end
+		return e2table
 	end
 
 	local function readE2Table(VM,Operands)
@@ -795,7 +787,7 @@ if myCPUExtension then
 				for ind,i in ipairs(buff) do
 					-- If the ZVM errors on write it'll return false
 					-- However, it returns nothing / nil on success.
-					if VM:WriteCell(ind+address,i) ~= nil then break end
+					if VM:WriteCell(address+ind-1,i) ~= nil then break end
 				end
 			end
 		end
