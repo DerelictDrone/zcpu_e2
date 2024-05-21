@@ -62,7 +62,7 @@ if myCPUExtension then
 			end
 			return charString
 		end
-		function VM:CheckE2ContextValid(Handle)
+		function VM:checkE2ContextValid(Handle)
 			if Handle > 0 then
 				if #self.E2Contexts <= Handle then
 					if self.E2Contexts[Handle] then
@@ -145,7 +145,7 @@ if myCPUExtension then
 
 	myCPUExtension:InstructionFromLuaFunc("E2_COMPILE", 2, generateE2Handle, {"W1"}, {
 		Version = 0.42,
-		Description = "Compiles an E2 script from string pointer in register 2, then writes handle number or 0(failed) to register 1"
+		Description = "Compiles an E2 script from string pointer in Operand 2, then writes handle number or 0(failed) to Operand 1"
 	})
 
 	local function setTargetContext(VM, Operands)
@@ -163,17 +163,23 @@ if myCPUExtension then
 
 	myCPUExtension:InstructionFromLuaFunc("E2_READ_HANDLE", 1, readTargetContext, {"W1"}, {
 		Version = 0.42,
-		Description = "Reads the currently targeted E2 handle to register"
+		Description = "Reads the currently targeted E2 handle to Operand"
 	})
 
 	local function ExecuteE2(VM, Operands)
-		if VM:checkE2ContextValid(VM, Operands[2]) then
-			local success, msg = VM.E2Contexts[Operands[2]].E2Func(VM.E2Contexts[Operands[2]].context)
-			PrintTable(VM.E2Contexts[Operands[2]])
+		if VM:checkE2ContextValid(Operands[2]) then
+			local E2Context = VM.E2Contexts[Operands[2]]
+			if not E2Context.E2Coroutine then
+				E2Context.E2Coroutine = coroutine.create(function() E2Context.E2Func(E2Context.context) end)
+			end
+			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine)
 			if not success then
-				VM.E2Contexts[Operands[2]].StatusMsg = msg
+				E2Context.StatusMsg = msg
 				Operands[1] = 1
 				return
+			end
+			if coroutine.status(E2Context.E2Coroutine) == "dead" then
+				E2Context.E2Coroutine = false
 			end
 			Operands[1] = 0
 			return
@@ -183,21 +189,25 @@ if myCPUExtension then
 
 	myCPUExtension:InstructionFromLuaFunc("E2_EXEC_HANDLE", 2, ExecuteE2, {"W1"}, {
 		Version = 0.42,
-		Description = "Runs E2 handle from Register 2 and writes 0 to Register 1 on success or writes 1 if an error occured in execution"
+		Description = "Runs E2 handle from Operand 2 and writes 0 to Operand 1 on success or writes 1 if an error occured in execution"
 	})
 
 	local function DestroyE2(VM, Operands)
-		if VM:checkE2ContextValid(VM, Operands[1]) then
+		if VM:checkE2ContextValid(Operands[1]) then
+			if VM.E2Contexts[VM.Operands[1]].E2Coroutine then
+				coroutine.close(VM.E2Contexts[VM.Operands[1]].E2Coroutine)
+			end
 			VM.E2Contexts[VM.Operands[1]] = false
 		end
 	end
+	
 	myCPUExtension:InstructionFromLuaFunc("E2_FREE_HANDLE", 2, DestroyE2, {}, {
 		Version = 0.42,
 		Description = "Destroys the E2 with the specified handle, freeing that space for another E2"
 	})
 
 	local function writeNumberVariable(VM, Operands)
-		if VM:checkE2ContextValid(VM, VM.TargetedE2Context) then
+		if VM:checkE2ContextValid(VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[1])
 			if str then
 				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = Operands[2]
@@ -207,11 +217,11 @@ if myCPUExtension then
 
 	myCPUExtension:InstructionFromLuaFunc("E2_WRITE_NUM", 2, writeNumberVariable, {}, {
 		Version = 0.42,
-		Description = "Writes number value to variable in targeted E2 handle using Register 1 as Variable Name and Register 2 as value"
+		Description = "Writes number value to variable in targeted E2 handle using Operand 1 as Variable Name and Operand 2 as value"
 	})
 
 	local function readNumberVariable(VM, Operands)
-		if VM:checkE2ContextValid(VM, VM.TargetedE2Context) then
+		if VM:checkE2ContextValid(VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[2])
 			if str then
 				if isnumber(VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str]) then
@@ -224,11 +234,11 @@ if myCPUExtension then
 	end
 	myCPUExtension:InstructionFromLuaFunc("E2_READ_NUM", 2, readNumberVariable, {"W1"}, {
 		Version = 0.42,
-		Description = "Reads number value from targeted E2 handle to Register 1 using Register 2 as Variable Name"
+		Description = "Reads number value from targeted E2 handle to Operand 1 using Operand 2 as Variable Name"
 	})
 
 	local function writeCPUWirelink(VM, Operands)
-		if VM:checkE2ContextValid(VM, VM.TargetedE2Context) then
+		if VM:checkE2ContextValid(VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[1])
 			if str then
 				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = VM.Entity
@@ -237,8 +247,9 @@ if myCPUExtension then
 	end
 	myCPUExtension:InstructionFromLuaFunc("E2_LINK_MEM", 1, writeCPUWirelink, {}, {
 		Version = 0.42,
-		Description = "Writes CPU Entity to variable using Register 1 as Variable Name"
+		Description = "Writes CPU Entity to variable using Operand 1 as Variable Name"
 	})
 
 	include("e2_type_serialization.lua")(myCPUExtension)
+	include("e2_cpu_interop.lua")(myCPUExtension)
 end
