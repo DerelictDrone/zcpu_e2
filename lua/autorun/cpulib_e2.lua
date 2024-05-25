@@ -182,6 +182,11 @@ if myCPUExtension then
 				E2Context.E2Coroutine = false
 			end
 			Operands[1] = 0
+			if msg then
+				if msg.zcpu_info then
+					E2Context.ZCPUFuncRequest = msg
+				end
+			end
 			return
 		end
 		Operands[1] = 1

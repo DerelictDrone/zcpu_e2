@@ -121,7 +121,7 @@
 	local function vector3ToBuffer(var)
 		return {var.x, var.y, var.z} -- both angles and vectors use these keys so this should work on both
 	end
-	local primitiveTypeConversionLookup = {
+	local typeConversionLookup = {
 		n = numberToBuffer, -- normal / number
 		e = entToBuffer, -- entity
 		s = stringToBuffer, -- string
@@ -137,7 +137,7 @@
 		v = vector3ToBuffer -- vector3
 	}
 	local function typeToBuffer(var, type)
-		local typeConverter = primitiveTypeConversionLookup[type]
+		local typeConverter = typeConversionLookup[type]
 		if typeConverter then
 			return typeConverter(var)
 		else
@@ -185,7 +185,7 @@
 	local function bufferToVector3(buff)
 		return Vector(buff[1], buff[2], buff[3])
 	end
-	local bufferToPrimitiveLookup = {
+	local bufferToTypeLookup = {
 		n = bufferToNumber, -- normal / number
 		e = bufferToEnt, -- entity
 		s = bufferToString, -- string
@@ -201,9 +201,9 @@
 		v = bufferToVector3 -- vector3
 	}
 	local function bufferToType(VM, buff, type)
-		local typeConversion = bufferToPrimitiveLookup[type]
+		local typeConversion = bufferToTypeLookup[type]
 		if typeConversion then
-			return typeConversion(buff)
+			return typeConversion(buff,VM)
 		end
 		return nil
 	end
@@ -292,7 +292,7 @@
 		-- so its size can be estimated as such
 		return 6 + nvars * 2
 	end
-	local function E2TabletoBuffer(VM, e2table)
+	local function E2TabletoBuffer(e2table,VM)
 		-- TODO: Optimize value/type writing, if we know the number of values and they're all forced to 1 byte
 		-- TODO: then calculating an offset between the two should be simple, so we don't have to run through both types
 		-- TODO: and values separately when we're already indexing types to check real var sizes, goes for both S values and N values
@@ -393,7 +393,7 @@
 		return buff
 	end
 
-	local function buffertoE2Table(VM, buff)
+	local function buffertoE2Table(buff,VM)
 		local e2table = E2Lib.newE2Table()
 		-- Parse n values and ntypes
 		if buff[1] > 0 then
@@ -464,6 +464,18 @@
 		end
 		return e2table
 	end
+
+	local function E2ArrayToBuffer(e2array,VM)
+		return E2TabletoBuffer(VM, E2ArraytoTable(e2array))
+	end
+	local function bufferToE2Array(buff,VM)
+		return buffertoE2Table(buff,VM).n
+	end
+
+	typeConversionLookup["t"] = E2TabletoBuffer
+	bufferToTypeLookup["t"] = buffertoE2Table
+	typeConversionLookup["r"] = E2ArrayToBuffer
+	bufferToTypeLookup["r"] = bufferToE2Array
 
 local function ext(myCPUExtension)
 	-- Returns the size of a variable type, or -1 if it cannot be converted
@@ -546,7 +558,7 @@ local function ext(myCPUExtension)
 				for i = 0, size - 1, 1 do
 					table.insert(buff, VM:ReadCell(address + i))
 				end
-				local e2table = buffertoE2Table(VM, buff)
+				local e2table = buffertoE2Table(buff,VM)
 				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = e2table
 			end
 		end
@@ -566,7 +578,7 @@ local function ext(myCPUExtension)
 				if type ~= "r" then
 					return
 				end
-				local buff = E2TabletoBuffer(VM, E2ArraytoTable(e2array))
+				local buff = E2ArrayToBuffer(e2array,VM)
 				local address = Operands[1]
 				for ind, i in ipairs(buff) do
 					-- If the ZVM errors on write it'll return false
@@ -592,8 +604,7 @@ local function ext(myCPUExtension)
 				for i = 0, size - 1, 1 do
 					table.insert(buff, VM:ReadCell(address + i))
 				end
-				local e2table = buffertoE2Table(VM, buff)
-				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = e2table.n
+				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = bufferToE2Array(buff,VM)
 			end
 		end
 	end
