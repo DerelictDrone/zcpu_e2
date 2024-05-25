@@ -41,10 +41,12 @@ if myCPUExtension then
 			VM.E2HookedJumps = true
 			VM.oldJumpFunc = VM.Jump
 			function VM:Jump(IP,CS)
+				print("Jumping to ",IP,CS)
 				local jmpSig = (CS or 0)..":"..(IP or 0)
 				local hookedJumpsAvailable = VM.HookedJumps[jmpSig]
 				local leftoverHooks = {}
 				if hookedJumpsAvailable then
+					print("Jump got a hook!")
 					for ind,i in ipairs(hookedJumpsAvailable) do
 						if not i.OneTime then
 							table.insert(leftoverHooks,i)
@@ -67,7 +69,7 @@ if myCPUExtension then
 				-- Generate a one-time jump hook to the current CS,IP
 				function VM:GenerateHookedReturn(func)
 					local jmpSig = (self.CS or 0)..":"..(self.IP or 0)
-					local hookedJump = {CS = self.CS, IP = self.IP, func = func}
+					local hookedJump = {func = func, OneTime=true}
 					if VM.HookedJumps[jmpSig] then
 						table.insert(VM.HookedJumps[jmpSig],hookedJump)
 						return
@@ -211,17 +213,17 @@ if myCPUExtension then
 			if not E2Context.E2Coroutine then
 				E2Context.E2Coroutine = coroutine.create(function() E2Context.E2Func(E2Context.context) end)
 			end
-			local retvalue
+			local ret_value
 			if E2Context.ZCPUFuncRequest then
 				if E2Context.ZCPUFuncRequest.completed then
-					retvalue = E2Context.ZCPUFuncRequest.retvalue
+					ret_value = E2Context.ZCPUFuncRequest.ret_value
 				else
 					Operands[1] = 1
 					E2Context.StatusMsg = "Attempted to continue execution without handling func request"
 					return
 				end
 			end
-			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine,retvalue)
+			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine,ret_value)
 			if not success then
 				E2Context.StatusMsg = msg
 				Operands[1] = 1
@@ -301,7 +303,7 @@ if myCPUExtension then
 	end
 	myCPUExtension:InstructionFromLuaFunc("E2_LINK_MEM", 1, writeCPUWirelink, {}, {
 		Version = 0.42,
-		Description = "Writes CPU Entity to variable using Operand 1 as Variable Name"
+		Description = "Writes CPU Entity to variable using Operand 1 as Variable Name, can be used to set a Wirelink variable to CPU."
 	})
 
 	include("e2_type_serialization.lua")(myCPUExtension)

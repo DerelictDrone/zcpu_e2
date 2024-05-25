@@ -17,7 +17,7 @@ local function splitTypeFast(sig)
 	return r
 end
 
-local function generateE2FuncRequest(args, signature, zcpu_info)
+local function generateE2FuncRequest(args, signature, zcpu_info, VM)
 	local buff = {}
 	local argptrs = {}
 	local extraptrs_required = 0
@@ -27,13 +27,16 @@ local function generateE2FuncRequest(args, signature, zcpu_info)
 	PrintTable(args)
 	local splitsig = splitTypeFast(signature)
 	for ind, i in ipairs(args) do
-		last_size = E2TypeLib.writeBuffer(buff, E2TypeLib.typeToBuffer(i, splitsig[ind]), buffpos + 1)
+		last_size = E2TypeLib.writeBuffer(buff, E2TypeLib.typeToBuffer(i, splitsig[ind], VM), buffpos + 1)
+		PrintTable(buff)
 		argptrs[ind] = buffpos
 		if last_size > 1 then
 			extraptrs_required = extraptrs_required + 1
 		end
 		buffpos = buffpos + last_size
 	end
+	print("Final buff")
+	PrintTable(buff)
 	local funcRequest = {
 		zcpu_info=zcpu_info,
 		argptrs=argptrs,
@@ -47,7 +50,7 @@ local function generateE2FuncRequest(args, signature, zcpu_info)
 end
 
 -- wrap into a coroutine yield and wait
-local function createZCPUE2InteropFunc(e2context, zsig)
+local function createZCPUE2InteropFunc(e2context, zsig, VM)
 	-- these will be on a per e2 basis
 	local sig = table.concat(zsig.args)
 	local function fn(...)
@@ -59,10 +62,11 @@ local function createZCPUE2InteropFunc(e2context, zsig)
 		local args = table.Pack(...)
 		-- 	PrintTable(...)
 		print("zcpu function called by e2")
-		local ret = coroutine.yield(generateE2FuncRequest(args, sig, zsig.ZCPU)) -- wait for zcpu to let us know we're ready
+		local ret = coroutine.yield(generateE2FuncRequest(args[1], sig, zsig.ZCPU, VM)) -- wait for zcpu to let us know we're ready
+		print("ZCPU call completed, ret value: ",ret)
 		return ret
 	end
-	return E2Lib.Lambda.new(sig, zsig.ret_value, fn)
+	return E2Lib.Lambda.new(sig, zsig.ret_type, fn)
 end
 
 -- theoretical structure for a function sig
@@ -146,7 +150,7 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 		}
 	end
 	if buff[4] > 0 then 
-		sigInfo.ret_value = VM.E2TypeInfo.TypeIDS[buff[4]]
+		sigInfo.ret_type = VM.E2TypeInfo.TypeIDS[buff[4]]
 	end
 	if buff[2] > 0 and buff[3] > 0 then
 		local argbuffer = {}
@@ -164,17 +168,17 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 		local userfunc = E2Context.context.funcs[sigInfo.E2Name]
 		if userfunc then
 			-- needs to be in format E2Name(nnn)
-			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_value,userfunc)
+			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_type,userfunc)
 		end
 		-- check if it's a lambda var
 		local lambdavar = E2Context.context.GlobalScope[sigInfo.E2Name]
 		if lambdavar then
-			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_value,lambdavar.fn)
+			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_type,lambdavar.fn)
 		end
 		-- check if it's a global e2 function
 		local e2globalfunc = wire_expression2_funcs[sigInfo.E2Name]
 		if e2globalfunc then
-			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_value,lambdavar.fn)
+			return E2Lib.Lambda.new(table.concat(sigInfo.args),sigInfo.ret_type,e2globalfunc.fn)
 		end
 		-- generate a function that will cause an error on call
 			return E2Lib.Lambda.new(nil,nil,
@@ -184,7 +188,7 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 			)
 	end
 	PrintTable(sigInfo)
-	return createZCPUE2InteropFunc(E2Context,sigInfo)
+	return createZCPUE2InteropFunc(E2Context,sigInfo, VM)
 end
 
 local function ex(myCPUExtension)
@@ -244,13 +248,57 @@ local function ex(myCPUExtension)
 			local E2Context = VM.E2Contexts[Operands[1]]
 			local FuncRequest = E2Context.ZCPUFuncRequest
 			if FuncRequest and not FuncRequest.completed then
+				PrintTable(FuncRequest)
+				local c_call_args = {} -- needs to be values, or ptrs to values, make sure that ptrs to values have ESP added to them
 				for ind,i in ipairs(FuncRequest.argptrs) do
-					
+					local varsize = FuncRequest.argptrs[ind+1] or FuncRequest.size-i
+					-- get diff between ptr 1 and next ptr or known end of buffer
+					if varsize > 1 then
+						local buff = {}
+						E2TypeLib.copyBufferSection(buff,FuncRequest.buff,1,i,varsize)
+						print("Copying large var to buffer")
+						PrintTable(buff)
+						-- we need to actually reverse this cause push will push it onto the stack and then stack decrements
+						-- so if we were to push 600,200,100(left to right) trying to read directly from the ptr might end up with
+						-- 100,200,600
+						for i=varsize,1,-1 do
+							VM:Push(buff[i])
+						end
+						table.insert(c_call_args,VM.ESP) -- push ptr to first element of var on stack
+					else
+						table.insert(c_call_args,FuncRequest.buff[i+1])
+					end
+				end
+				print("C Call generation done, here are the args")
+				PrintTable(c_call_args)
+				-- HLZasm funcs appear to need these reversed too, and don't use C call right to left args like I initially thought.
+				for i=#c_call_args,1,-1 do
+					VM:Push(c_call_args[i])
+				end
+				-- Allows for semi-variadic handling of args where ECX is the number of args, for funcs like printf(char*,...) in C
+				-- This IS part of the C Calling from HLZasm, but I've never seen a user made func that used it.
+				VM.ECX = #c_call_args
+				-- Generate a return to give value of EAX
+				local function extractReturnValue(VM)
+					FuncRequest.ret_value = E2TypeLib.readTypeFromMemory(VM.EAX,FuncRequest.ret_type)
+					FuncRequest.completed = true
+				end
+				VM:GenerateHookedReturn(extractReturnValue)
+				-- check if far call or near call
+				if bit.band(FuncRequest.zcpu_info.flags,2) ~= 0 then
+					-- Far call, use the CS provided by func signature
+					VM:Push(VM.CS)
+					VM:Push(VM.IP)
+					VM:Jump(FuncRequest.zcpu_info.IP,VM.CS)
+				else
+					-- Near call, use current CS for jump
+					VM:Push(VM.IP)
+					VM:Jump(FuncRequest.zcpu_info.IP,VM.CS)
 				end
 			end
 		end
 	end
-	myCPUExtension:InstructionFromLuaFunc("E2_HANDLE_FUNC_REQUEST", 1, handleZCPUFuncRequest, {}, {
+	myCPUExtension:InstructionFromLuaFunc("E2_HANDLE_FUNC_REQUEST", 1, handleZCPUFuncRequest, {"CB"}, {
 		Version = 0.42,
 		Description = "Places arguments in the stack, the number of arguments in ECX, and then calls the requested CS and IP from the E2 handle in Operand 1. Upon return or jumping back will save the value in EAX as the return value to E2, the E2 will continue from the point it made the call on next execution."
 	})

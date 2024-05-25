@@ -136,22 +136,22 @@
 		a = vector3ToBuffer, -- angle
 		v = vector3ToBuffer -- vector3
 	}
-	local function typeToBuffer(var, type)
+	local function typeToBuffer(var, type, VM)
 		local typeConverter = typeConversionLookup[type]
 		if typeConverter then
-			return typeConverter(var)
+			return typeConverter(var,VM)
 		else
 			return {0}
 		end
 	end
 
-	local function writeBuffer(table, buffer, startind)
+	local function writeBuffer(dest, buffer, startind)
 		if not startind then
 			startind = 1
 		end
 		local written_bytes = 0
 		for ind, i in ipairs(buffer) do
-			table[startind + (ind - 1)] = i
+			dest[startind + (ind - 1)] = i
 			written_bytes = written_bytes + 1
 		end
 		return written_bytes
@@ -471,11 +471,41 @@
 	local function bufferToE2Array(buff,VM)
 		return buffertoE2Table(buff,VM).n
 	end
-
+	-- TODO: Store this type conversion stuff on VM so it can be added to by other files
 	typeConversionLookup["t"] = E2TabletoBuffer
 	bufferToTypeLookup["t"] = buffertoE2Table
 	typeConversionLookup["r"] = E2ArrayToBuffer
 	bufferToTypeLookup["r"] = bufferToE2Array
+	-- Funcs for getting size of type from memory, given pointer and VM
+	local typeMemorySizeFuncs = {
+		t=getE2TableBufferSize,
+		r=getE2TableBufferSize,
+	}
+
+	local function readTypeFromMemory(VM,ptr,type)
+		-- get size of type, first check if it's primitive
+		local primitive = primitiveSizeLookup[type]
+		local buff = {}
+		if primitive then
+			if primitive > 1 then
+				for i=ptr,ptr+primitive,1 do
+					table.insert(buff,VM:ReadCell(i))
+				end
+			else
+				-- ptr was not in fact a ptr but just the value
+				return bufferToType({ptr},type)
+			end
+		else
+			local sizeFunc = typeMemorySizeFuncs[type]
+			if sizeFunc then
+				local size = sizeFunc(VM,ptr)
+				for i=ptr,ptr+size,1 do
+					table.insert(buff,VM:ReadCell(i))
+				end
+			end
+		end
+		return bufferToType(buff,type)
+	end
 
 local function ext(myCPUExtension)
 	-- Returns the size of a variable type, or -1 if it cannot be converted
@@ -631,4 +661,5 @@ return ext,{
 	getE2TableBufferSize = getE2TableBufferSize,
 	E2TabletoBuffer = E2TabletoBuffer,
 	buffertoE2Table = buffertoE2Table,
+	readTypeFromMemory = readTypeFromMemory
 }
