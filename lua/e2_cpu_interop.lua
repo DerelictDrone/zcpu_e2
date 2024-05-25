@@ -20,19 +20,25 @@ end
 local function generateE2FuncRequest(args, signature, zcpu_info)
 	local buff = {}
 	local argptrs = {}
+	local extraptrs_required = 0
 	local buffpos = 0
 	local last_size = 0
 	print("req args")
 	PrintTable(args)
+	local splitsig = splitTypeFast(signature)
 	for ind, i in ipairs(args) do
-		 last_size = E2TypeLib.writeBuffer(buff, E2TypeLib.typeToBuffer(i, signature[ind]), buffpos + 1)
+		last_size = E2TypeLib.writeBuffer(buff, E2TypeLib.typeToBuffer(i, splitsig[ind]), buffpos + 1)
 		argptrs[ind] = buffpos
+		if last_size > 1 then
+			extraptrs_required = extraptrs_required + 1
+		end
 		buffpos = buffpos + last_size
 	end
 	local funcRequest = {
 		zcpu_info=zcpu_info,
 		argptrs=argptrs,
-		signature=signature,
+		extraptrs_required=extraptrs_required,
+		signature=splitsig,
 		buff=buff,
 		size=buffpos -- does not take into account the number of ptrs required for vars
 	}
@@ -223,14 +229,30 @@ local function ex(myCPUExtension)
 	end
 	myCPUExtension:InstructionFromLuaFunc("E2_WRITE_FUNCTION_VAR", 2, writeZCPULinkedE2Lambda, {}, {
 		Version = 0.42,
-		Description = "Get size of variable in open e2 handle by name in operand 2 and put its size in operand 1"
+		Description = "Write a function to function variable with Operand 1 as the variable name and Operand 2 is a ptr to a function signature."
 	})
 	local function linkZCPUFunction(VM, Operands)
 		VM.E2Contexts[VM.TargetedE2Context].context.funcs["first()"] = function() print("hook succ") end
 	end
-	myCPUExtension:InstructionFromLuaFunc("E2_LINK_GLOBAL_FUNCTION", 2, linkZCPUFunction, {"W1"}, {
+	myCPUExtension:InstructionFromLuaFunc("E2_LINK_GLOBAL_FUNCTION", 2, linkZCPUFunction, {}, {
 		Version = 0.42,
-		Description = "Get size of variable in open e2 handle by name in operand 2 and put its size in operand 1"
+		Description = "Write a function to replace a user-written function in the script.\nOnly works without the @strict directive\nOperand 1 is the function name to replace and Operand 2 is a ptr to a function signature."
+	})
+	local function handleZCPUFuncRequest(VM, Operands)
+		-- push args to stack, put num of args in ECX, hook return, and then jump to function
+		if VM:checkE2ContextValid(Operands[1]) then
+			local E2Context = VM.E2Contexts[Operands[1]]
+			local FuncRequest = E2Context.ZCPUFuncRequest
+			if FuncRequest and not FuncRequest.completed then
+				for ind,i in ipairs(FuncRequest.argptrs) do
+					
+				end
+			end
+		end
+	end
+	myCPUExtension:InstructionFromLuaFunc("E2_HANDLE_FUNC_REQUEST", 1, handleZCPUFuncRequest, {}, {
+		Version = 0.42,
+		Description = "Places arguments in the stack, the number of arguments in ECX, and then calls the requested CS and IP from the E2 handle in Operand 1. Upon return or jumping back will save the value in EAX as the return value to E2, the E2 will continue from the point it made the call on next execution."
 	})
 end
-return ex, {64}
+return ex

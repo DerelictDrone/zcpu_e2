@@ -36,7 +36,46 @@ if myCPUExtension then
 				}
 			end
 		end
-
+		VM.HookedJumps = {}
+		if not VM.E2HookedJumps then
+			VM.E2HookedJumps = true
+			VM.oldJumpFunc = VM.Jump
+			function VM:Jump(IP,CS)
+				local jmpSig = (CS or 0)..":"..(IP or 0)
+				local hookedJumpsAvailable = VM.HookedJumps[jmpSig]
+				local leftoverHooks = {}
+				if hookedJumpsAvailable then
+					for ind,i in ipairs(hookedJumpsAvailable) do
+						if not i.OneTime then
+							table.insert(leftoverHooks,i)
+						end
+						i.func(self) -- pass vm so they can do what they need to with it
+					end
+					if #leftoverHooks > 0 then
+						VM.HookedJumps[(CS or 0)..":"..(IP or 0)] = leftoverHooks
+					else
+						-- No hooks left? Clean it out.
+						VM.HookedJumps[(CS or 0)..":"..(IP or 0)] = nil
+					end
+				end
+				VM:oldJumpFunc(IP,CS)
+			end
+			-- replace implementation of JMP to check if we're jumping to an IP that we're expecting
+			-- to be returned to after an e2 => zcpu call
+			-- Thinking on it now, this may also be the way to allow a zcpu => e2 call, by hooking
+			-- an IP that we jump to and then returning immediately after
+				-- Generate a one-time jump hook to the current CS,IP
+				function VM:GenerateHookedReturn(func)
+					local jmpSig = (self.CS or 0)..":"..(self.IP or 0)
+					local hookedJump = {CS = self.CS, IP = self.IP, func = func}
+					if VM.HookedJumps[jmpSig] then
+						table.insert(VM.HookedJumps[jmpSig],hookedJump)
+						return
+					end
+					-- If there's none yet, create it.
+					VM.HookedJumps[jmpSig] = {hookedJump}
+				end
+		end
 		function VM:ReadString(address)
 			local charString = ""
 			local charCount = 0
@@ -172,7 +211,17 @@ if myCPUExtension then
 			if not E2Context.E2Coroutine then
 				E2Context.E2Coroutine = coroutine.create(function() E2Context.E2Func(E2Context.context) end)
 			end
-			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine)
+			local retvalue
+			if E2Context.ZCPUFuncRequest then
+				if E2Context.ZCPUFuncRequest.completed then
+					retvalue = E2Context.ZCPUFuncRequest.retvalue
+				else
+					Operands[1] = 1
+					E2Context.StatusMsg = "Attempted to continue execution without handling func request"
+					return
+				end
+			end
+			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine,retvalue)
 			if not success then
 				E2Context.StatusMsg = msg
 				Operands[1] = 1
@@ -182,7 +231,7 @@ if myCPUExtension then
 				E2Context.E2Coroutine = false
 			end
 			Operands[1] = 0
-			if msg then
+			if istable(msg) then
 				if msg.zcpu_info then
 					E2Context.ZCPUFuncRequest = msg
 				end
