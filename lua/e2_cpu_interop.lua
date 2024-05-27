@@ -252,11 +252,11 @@ local function ex(myCPUExtension)
 				PrintTable(FuncRequest)
 				local c_call_args = {} -- needs to be values, or ptrs to values, make sure that ptrs to values have ESP added to them
 				for ind,i in ipairs(FuncRequest.argptrs) do
-					local varsize = FuncRequest.argptrs[ind+1] or FuncRequest.size-i
+					local varsize = (FuncRequest.argptrs[ind+1] or FuncRequest.size)-i
 					-- get diff between ptr 1 and next ptr or known end of buffer
 					if varsize > 1 then
 						local buff = {}
-						E2TypeLib.copyBufferSection(buff,FuncRequest.buff,1,i,varsize)
+						E2TypeLib.copyBufferSection(buff,FuncRequest.buff,0,i,varsize+1)
 						print("Copying large var to buffer")
 						PrintTable(buff)
 						-- we need to actually reverse this cause push will push it onto the stack and then stack decrements
@@ -265,7 +265,8 @@ local function ex(myCPUExtension)
 						for i=varsize,1,-1 do
 							VM:Push(buff[i])
 						end
-						table.insert(c_call_args,VM.ESP) -- push ptr to first element of var on stack
+						-- VM.ESP is the ptr to the current free index on stack, so the last element altered is ESP+1
+						table.insert(c_call_args,VM.ESP+1) -- push ptr to first element of var on stack
 					else
 						table.insert(c_call_args,FuncRequest.buff[i+1])
 					end
