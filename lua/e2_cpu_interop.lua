@@ -17,7 +17,7 @@ local function splitTypeFast(sig)
 	return r
 end
 
-local function generateE2FuncRequest(args, signature, zcpu_info, VM)
+local function generateE2FuncRequest(args, signature, ret_type, zcpu_info, VM)
 	local buff = {}
 	local argptrs = {}
 	local extraptrs_required = 0
@@ -40,6 +40,7 @@ local function generateE2FuncRequest(args, signature, zcpu_info, VM)
 	local funcRequest = {
 		zcpu_info=zcpu_info,
 		argptrs=argptrs,
+		ret_type=ret_type,
 		extraptrs_required=extraptrs_required,
 		signature=splitsig,
 		buff=buff,
@@ -62,7 +63,7 @@ local function createZCPUE2InteropFunc(e2context, zsig, VM)
 		local args = table.Pack(...)
 		-- 	PrintTable(...)
 		print("zcpu function called by e2")
-		local ret = coroutine.yield(generateE2FuncRequest(args[1], sig, zsig.ZCPU, VM)) -- wait for zcpu to let us know we're ready
+		local ret = coroutine.yield(generateE2FuncRequest(args[1], sig, zsig.ret_type, zsig.ZCPU, VM)) -- wait for zcpu to let us know we're ready
 		print("ZCPU call completed, ret value: ",ret)
 		return ret
 	end
@@ -150,7 +151,7 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 		}
 	end
 	if buff[4] > 0 then 
-		sigInfo.ret_type = VM.E2TypeInfo.TypeIDS[buff[4]]
+		sigInfo.ret_type = VM.E2TypeInfo.TypeIDs[buff[4]].name
 	end
 	if buff[2] > 0 and buff[3] > 0 then
 		local argbuffer = {}
@@ -280,7 +281,7 @@ local function ex(myCPUExtension)
 				VM.ECX = #c_call_args
 				-- Generate a return to give value of EAX
 				local function extractReturnValue(VM)
-					FuncRequest.ret_value = E2TypeLib.readTypeFromMemory(VM.EAX,FuncRequest.ret_type)
+					FuncRequest.ret_value = E2TypeLib.readTypeFromMemory(VM,VM.EAX,FuncRequest.ret_type)
 					FuncRequest.completed = true
 				end
 				VM:GenerateHookedReturn(extractReturnValue)

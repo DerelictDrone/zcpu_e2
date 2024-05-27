@@ -493,7 +493,7 @@
 				end
 			else
 				-- ptr was not in fact a ptr but just the value
-				return bufferToType({ptr},type)
+				return bufferToType(VM,{ptr},type)
 			end
 		else
 			local sizeFunc = typeMemorySizeFuncs[type]
@@ -504,7 +504,7 @@
 				end
 			end
 		end
-		return bufferToType(buff,type)
+		return bufferToType(VM,buff,type)
 	end
 
 local function ext(myCPUExtension)
