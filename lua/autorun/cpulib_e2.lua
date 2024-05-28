@@ -7,6 +7,15 @@ local myCPUExtension = CPULib:CreateExtension("e2_compiler", "CPU")
 
 if myCPUExtension then
 
+	-- Add strings to this list to get them to register, they'll be loaded in the order they're written.
+	-- The loader is at the bottom of the file so the instructions in this file will go first.
+	local libraries = {
+		"e2_type_serialization.lua",
+		"e2_cpu_interop.lua",
+	}
+
+	local post_init_funcs = {}
+
 	local function addE2Functions(VM, Operands)
 		VM.E2Contexts = {}
 		VM.TargetedE2Context = 0 -- intentional wipe of previous state
@@ -41,12 +50,10 @@ if myCPUExtension then
 			VM.E2HookedJumps = true
 			VM.oldJumpFunc = VM.Jump
 			function VM:Jump(IP,CS)
-				print("Jumping to ",IP,CS)
 				local jmpSig = (CS or 0)..":"..(IP or 0)
 				local hookedJumpsAvailable = VM.HookedJumps[jmpSig]
 				local leftoverHooks = {}
 				if hookedJumpsAvailable then
-					print("Jump got a hook!")
 					for ind,i in ipairs(hookedJumpsAvailable) do
 						if not i.OneTime then
 							table.insert(leftoverHooks,i)
@@ -112,6 +119,9 @@ if myCPUExtension then
 				end
 			end
 			return false
+		end
+		for _,i in ipairs(post_init_funcs) do
+			i(VM)
 		end
 	end
 
@@ -223,7 +233,8 @@ if myCPUExtension then
 					return
 				end
 			end
-			local success, msg = coroutine.resume(VM.E2Contexts[Operands[2]].E2Coroutine,ret_value)
+			local success, msg = coroutine.resume(E2Context.E2Coroutine,ret_value)
+			PrintTable(E2Context)
 			if not success then
 				E2Context.StatusMsg = msg
 				Operands[1] = 1
@@ -262,37 +273,6 @@ if myCPUExtension then
 		Description = "Destroys the E2 with the specified handle, freeing that space for another E2"
 	})
 
-	local function writeNumberVariable(VM, Operands)
-		if VM:checkE2ContextValid(VM.TargetedE2Context) then
-			local str = VM:ReadString(Operands[1])
-			if str then
-				VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = Operands[2]
-			end
-		end
-	end
-
-	myCPUExtension:InstructionFromLuaFunc("E2_WRITE_NUM", 2, writeNumberVariable, {}, {
-		Version = 0.42,
-		Description = "Writes number value to variable in targeted E2 handle using Operand 1 as Variable Name and Operand 2 as value"
-	})
-
-	local function readNumberVariable(VM, Operands)
-		if VM:checkE2ContextValid(VM.TargetedE2Context) then
-			local str = VM:ReadString(Operands[2])
-			if str then
-				if isnumber(VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str]) then
-					Operands[1] = VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str]
-				else
-					Operands[1] = 0
-				end
-			end
-		end
-	end
-	myCPUExtension:InstructionFromLuaFunc("E2_READ_NUM", 2, readNumberVariable, {"W1"}, {
-		Version = 0.42,
-		Description = "Reads number value from targeted E2 handle to Operand 1 using Operand 2 as Variable Name"
-	})
-
 	local function writeCPUWirelink(VM, Operands)
 		if VM:checkE2ContextValid(VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[1])
@@ -306,6 +286,19 @@ if myCPUExtension then
 		Description = "Writes CPU Entity to variable using Operand 1 as Variable Name, can be used to set a Wirelink variable to CPU."
 	})
 
-	include("e2_type_serialization.lua")(myCPUExtension)
-	include("e2_cpu_interop.lua")(myCPUExtension)
+	-- Load all the libraries, put their post inits in so when E2_INIT runs it'll load these in order.
+timer.Simple(
+	5,
+	function()
+		for ind,i in ipairs(libraries) do
+			local instructions,_,post_init = include(i)
+			if instructions then
+				instructions(myCPUExtension)
+			end
+			if post_init then
+				table.insert(post_init_funcs,post_init)
+			end
+		end
+	end
+	)
 end

@@ -56,7 +56,7 @@
 		local sum = 0
 		local singleCellTypes = 0
 		for ind, i in ipairs(arr) do
-			local primitive = primitiveSizeLookup[i]
+			local primitive = VM.E2TypeLib.primitiveSizeLookup[i]
 			if primitive then
 				if primitive == 1 then
 					singleCellTypes = singleCellTypes + 1
@@ -121,7 +121,7 @@
 	local function vector3ToBuffer(var)
 		return {var.x, var.y, var.z} -- both angles and vectors use these keys so this should work on both
 	end
-	local typeConversionLookup = {
+	local typeToBufferLookup = {
 		n = numberToBuffer, -- normal / number
 		e = entToBuffer, -- entity
 		s = stringToBuffer, -- string
@@ -137,7 +137,7 @@
 		v = vector3ToBuffer -- vector3
 	}
 	local function typeToBuffer(var, type, VM)
-		local typeConverter = typeConversionLookup[type]
+		local typeConverter = typeToBufferLookup[type]
 		if typeConverter then
 			return typeConverter(var,VM)
 		else
@@ -201,7 +201,7 @@
 		v = bufferToVector3 -- vector3
 	}
 	local function bufferToType(VM, buff, type)
-		local typeConversion = bufferToTypeLookup[type]
+		local typeConversion = VM.bufferToTypeLookup[type]
 		if typeConversion then
 			return typeConversion(buff,VM)
 		end
@@ -241,7 +241,7 @@
 					local type = VM:ReadCell(ptr + stypesptr + i)
 					type = VM.E2TypeInfo.TypeIDs[type]
 					if type then
-						local primitive = primitiveSizeLookup[type.name] or 0
+						local primitive = VM.E2TypeLib.primitiveSizeLookup[type.name] or 0
 						if primitive > 1 then
 							local sptr = VM:ReadCell(ptr + svarptr + i)
 							if sptr > lastptr then
@@ -265,7 +265,7 @@
 					local type = VM:ReadCell(ptr + ntypesptr + i)
 					type = VM.E2TypeInfo.TypeIDs[type]
 					if type then
-						local primitive = primitiveSizeLookup[type.name] or 0
+						local primitive = VM.E2TypeLib.primitiveSizeLookup[type.name] or 0
 						if primitive > 1 then
 							local sptr = VM:ReadCell(ptr + nvarptr + i)
 							if sptr > lastptr then
@@ -403,7 +403,7 @@
 				local type = VM.E2TypeInfo.TypeIDs[buff[ntypeptr + ind]]
 				local value
 				if type then
-					local size = primitiveSizeLookup[type.name]
+					local size = VM.E2TypeLib.primitiveSizeLookup[type.name]
 					local tempBuffer = {}
 					local dptr = nptr + ind
 					if size then
@@ -437,7 +437,7 @@
 				local type = VM.E2TypeInfo.TypeIDs[buff[stypeptr + ind]]
 				local value
 				if type then
-					local size = primitiveSizeLookup[type.name]
+					local size = VM.E2TypeLib.primitiveSizeLookup[type.name]
 					local tempBuffer = {}
 					local dptr = sptr + ind
 					if size then
@@ -472,9 +472,9 @@
 		return buffertoE2Table(buff,VM).n
 	end
 	-- TODO: Store this type conversion stuff on VM so it can be added to by other files
-	typeConversionLookup["t"] = E2TabletoBuffer
+	typeToBufferLookup["t"] = E2TabletoBuffer
 	bufferToTypeLookup["t"] = buffertoE2Table
-	typeConversionLookup["r"] = E2ArrayToBuffer
+	typeToBufferLookup["r"] = E2ArrayToBuffer
 	bufferToTypeLookup["r"] = bufferToE2Array
 	-- Funcs for getting size of type from memory, given pointer and VM
 	local typeMemorySizeFuncs = {
@@ -484,7 +484,7 @@
 
 	local function readTypeFromMemory(VM,ptr,type)
 		-- get size of type, first check if it's primitive
-		local primitive = primitiveSizeLookup[type]
+		local primitive = VM.E2TypeLib.primitiveSizeLookup[type]
 		local buff = {}
 		if primitive then
 			if primitive > 1 then
@@ -496,7 +496,7 @@
 				return bufferToType(VM,{ptr},type)
 			end
 		else
-			local sizeFunc = typeMemorySizeFuncs[type]
+			local sizeFunc = VM.E2TypeLib.typeMemorySizeFuncs[type]
 			if sizeFunc then
 				local size = sizeFunc(VM,ptr)
 				for i=ptr,ptr+size,1 do
@@ -518,7 +518,7 @@ local function ext(myCPUExtension)
 					Operands[1] = -1 -- couldn't fetch var
 				end
 				local e2type = identifyType(var)
-				local primitive = primitiveSizeLookup[e2type]
+				local primitive = VM.E2TypeLib.primitiveSizeLookup[e2type]
 				if primitive then
 					Operands[1] = primitive
 					return
@@ -558,6 +558,67 @@ local function ext(myCPUExtension)
 		Version = 0.42,
 		Description = "Get type of variable using name in Operand 2, writes type enum into Operand 1 or 0 if failed"
 	})
+	
+
+	-- ! Generate read and write functions for primitives
+	for key,primitiveSize in pairs(primitiveSizeLookup) do
+		local typeNameLong = wire_expression_types2[key][1]
+		local ptrTypeStr, ptrTypeStr2
+		if typeNameLong:lower() == "normal" then
+			typeNameLong = "NUMBER"
+		end
+		if primitiveSize > 1 then
+			ptrTypeStr = " pointer to "
+			ptrTypeStr2 = " memory address in "
+		end
+		local buffToTypeFunc = bufferToTypeLookup[key]
+		if buffToTypeFunc then
+			print(typeNameLong,"has an available write func")
+			local function writeVariable(VM, Operands)
+				if VM:checkE2ContextValid(VM.TargetedE2Context) then
+					local str = VM:ReadString(Operands[1])
+					if str then
+						local buff = {}
+						if primitiveSize > 1 then
+							for i=0,primitiveSize-1 do
+								table.insert(buff,VM:ReadCell(Operands[2]+i))
+							end
+						else
+							buff[1] = Operands[2]
+						end
+						VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str] = buffToTypeFunc(buff,VM)
+					end
+				end
+			end
+			myCPUExtension:InstructionFromLuaFunc("E2_WRITE_"..typeNameLong, 2, writeVariable, {}, {
+				Version = 0.42,
+				Description = "Writes" .. typeNameLong:lower() .. " value to variable in targeted E2 handle using Operand 1 as Variable Name and Operand 2 as".. (ptrTypeStr or " ") .."value"
+			})
+			end
+		local typeToBuffFunc = typeToBufferLookup[key]
+		if typeToBuffFunc then
+			print(typeNameLong,"has an available read func")
+			local function readVariable(VM, Operands)
+				if VM:checkE2ContextValid(VM.TargetedE2Context) then
+					local str = VM:ReadString(Operands[2])
+					if str then
+						local buff = typeToBuffFunc(VM.E2Contexts[VM.TargetedE2Context].context.GlobalScope[str],VM)
+						if primitiveSize > 1 then
+							for ind,i in ipairs(buff) do
+								VM:WriteCell((Operands[1]+ind)-1,i)
+							end
+						else
+							Operands[1] = buff[1]
+						end
+					end
+				end
+			end
+			myCPUExtension:InstructionFromLuaFunc("E2_READ_"..typeNameLong, 2, readVariable, {"W1"}, {
+				Version = 0.42,
+				Description = "Reads " .. typeNameLong:lower() .. " value from targeted E2 handle to" .. (ptrTypeStr2 or " ") .. "Operand 1 using Operand 2 as Variable Name"
+			})
+		end
+	end
 	local function readE2Table(VM, Operands)
 		if VM:checkE2ContextValid(VM.TargetedE2Context) then
 			local str = VM:ReadString(Operands[2])
@@ -597,7 +658,6 @@ local function ext(myCPUExtension)
 		Version = 0.42,
 		Description = "Write a table to E2 by name in Operand 1 from Memory Address in Operand 2"
 	})
-
 
 	local function readE2Array(VM, Operands)
 		if VM:checkE2ContextValid(VM.TargetedE2Context) then
@@ -642,12 +702,15 @@ local function ext(myCPUExtension)
 		Version = 0.42,
 		Description = "Write an array to E2 by name in Operand 1 from Memory Address in Operand 2"
 	})
-
-
+	-- autogenerate primitive reads and writes
 end
 
-return ext,{
+
+local E2TypeLib = {
 	primitiveSizeLookup = primitiveSizeLookup,
+	typeToBufferLookup = typeToBufferLookup,
+	bufferToTypeLookup = bufferToTypeLookup,
+	typeMemorySizeFuncs = typeMemorySizeFuncs,
 	identifyType = identifyType,
 	E2ArraytoTable = E2ArraytoTable,
 	sumTypeArray = sumTypeArray,
@@ -663,3 +726,9 @@ return ext,{
 	buffertoE2Table = buffertoE2Table,
 	readTypeFromMemory = readTypeFromMemory
 }
+
+local function vm_init(VM)
+		VM.E2TypeLib = E2TypeLib
+end
+
+return ext,E2TypeLib,vm_init

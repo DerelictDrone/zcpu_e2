@@ -1,6 +1,3 @@
--- Functionality for creating E2 functions from ZCPU
-local _, E2TypeLib = include("e2_type_serialization.lua")
-
 -- ripped from expression2/core/functions.lua, they don't export this anywhere :(
 local function splitTypeFast(sig)
 	local i, r, count, len = 1, {}, 0, #sig
@@ -27,7 +24,7 @@ local function generateE2FuncRequest(args, signature, ret_type, zcpu_info, VM)
 	PrintTable(args)
 	local splitsig = splitTypeFast(signature)
 	for ind, i in ipairs(args) do
-		last_size = E2TypeLib.writeBuffer(buff, E2TypeLib.typeToBuffer(i, splitsig[ind], VM), buffpos + 1)
+		last_size = VM.E2TypeLib.writeBuffer(buff, VM.E2TypeLib.typeToBuffer(i, splitsig[ind], VM), buffpos + 1)
 		PrintTable(buff)
 		argptrs[ind] = buffpos
 		if last_size > 1 then
@@ -104,7 +101,7 @@ local function funcSignatureToBuffer(funcSignature,VM)
 		flags = flags + 1 -- other flag parsing later, just mark it as E2
 		local nameString = table.Pack(string.byte(funcSignature.E2Name))
 		table.insert(nameString,0)
-		buff[3] = E2TypeLib.writeBuffer(buff,nameString,5)+4 -- ptr = metadata + strlen
+		buff[3] = VM.E2TypeLib.writeBuffer(buff,nameString,5)+4 -- ptr = metadata + strlen
 	else
 		flags = funcSignature.ZCPU.flags
 		buff[3] = 6
@@ -142,7 +139,7 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 		-- because it has to exist in the e2
 		-- side note, we do this because we cannot serialize real lua functions safely
 		-- because if it's a number, it can be altered easily to replace it with another.
-		sigInfo.E2Name = E2TypeLib.readStringFromNumberBuffer(buff,5)
+		sigInfo.E2Name = VM.E2TypeLib.readStringFromNumberBuffer(buff,5)
 	else
 		sigInfo.ZCPU = {
 			CS = buff[5],
@@ -155,7 +152,7 @@ local function bufferToFuncSignature(buff,VM,E2Context)
 	end
 	if buff[2] > 0 and buff[3] > 0 then
 		local argbuffer = {}
-		E2TypeLib.copyBufferSection(argbuffer,buff,1,buff[3]+1,buff[2])
+		VM.E2TypeLib.copyBufferSection(argbuffer,buff,1,buff[3]+1,buff[2])
 		PrintTable(buff)
 		print(buff[3])
 		PrintTable(argbuffer)
@@ -256,7 +253,7 @@ local function ex(myCPUExtension)
 					-- get diff between ptr 1 and next ptr or known end of buffer
 					if varsize > 1 then
 						local buff = {}
-						E2TypeLib.copyBufferSection(buff,FuncRequest.buff,0,i,varsize+1)
+						VM.E2TypeLib.copyBufferSection(buff,FuncRequest.buff,0,i,varsize+1)
 						print("Copying large var to buffer")
 						PrintTable(buff)
 						-- we need to actually reverse this cause push will push it onto the stack and then stack decrements
@@ -282,7 +279,7 @@ local function ex(myCPUExtension)
 				VM.ECX = #c_call_args
 				-- Generate a return to give value of EAX
 				local function extractReturnValue(VM)
-					FuncRequest.ret_value = E2TypeLib.readTypeFromMemory(VM,VM.EAX,FuncRequest.ret_type)
+					FuncRequest.ret_value = VM.E2TypeLib.readTypeFromMemory(VM,VM.EAX,FuncRequest.ret_type)
 					FuncRequest.completed = true
 				end
 				VM:GenerateHookedReturn(extractReturnValue)
@@ -305,4 +302,9 @@ local function ex(myCPUExtension)
 		Description = "Places arguments in the stack, the number of arguments in ECX, and then calls the requested CS and IP from the E2 handle in Operand 1. Upon return or jumping back will save the value in EAX as the return value to E2, the E2 will continue from the point it made the call on next execution."
 	})
 end
-return ex
+
+local function vm_init(VM)
+
+end
+
+return ex,{},vm_init
